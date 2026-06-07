@@ -3,6 +3,8 @@ using BroMakerLib;
 using UnityEngine;
 using System;
 using BroMakerLib.Loggers;
+using System.Data.SqlTypes;
+using System.Collections.Generic;
 
 namespace BronobiMod
 {
@@ -32,6 +34,10 @@ namespace BronobiMod
         protected float _specialAnimationRate = 0.0434f;
 
         protected AudioClip _forcePush;
+
+        protected MookRiotShield _mookRiotShield = null;
+        protected bool _secondSwordHit = false;
+        protected bool _hadRiotShield = false;
 
         public void SetupGrabedUnit(Mook mook)
         {
@@ -263,17 +269,7 @@ namespace BronobiMod
         }
         #endregion
 
-        protected override void FireWeapon(float x, float y, float xSpeed, float ySpeed)
-        {
-            if (_grabbedMook)
-            {
-                if (!_grabbedBoss && (_grabbedMook.NotAs<MookArmouredGuy>() || _grabbedMook.As<MookArmouredGuy>().pilotUnit.NotAs<BroBase>()))
-                    _grabbedMook.Gib();
-                UngrabMook();
-                return;
-            }
-            base.FireWeapon(x, y, xSpeed, ySpeed);
-        }
+        // Special
         protected override void UseSpecial()
         {
             if (_grabbedMook)
@@ -341,5 +337,152 @@ namespace BronobiMod
             MindControlEffect controlEffect = mook.gameObject.AddComponent<MindControlEffect>();
             controlEffect.Setup(this, mookNum, _controlTime);
         }
+
+        // Attack
+        protected override void UseFire()
+        {
+            if (_mookRiotShield != null)
+            {
+                return;
+            }
+            _hadRiotShield = false;
+            alreadyHit.Clear();
+            hasHitWithWall = false;
+            hasHitWithSlice = false;
+            hasPlayedAttackHitSound = false;
+            if (_grabbedMook)
+            {
+                if (!_grabbedBoss && (_grabbedMook.NotAs<MookArmouredGuy>() || _grabbedMook.As<MookArmouredGuy>().pilotUnit.NotAs<BroBase>()))
+                    _grabbedMook.Gib();
+                UngrabMook();
+            }
+            else
+            {
+                gunFrame = 6;
+                FireWeapon(base.X + base.transform.localScale.x * 10f, base.Y + 6.5f, base.transform.localScale.x * 400f, UnityEngine.Random.Range(0, 40) - 20);
+                PlayAttackSound();
+            }
+            Map.DisturbWildLife(base.X, base.Y, 60f, base.playerNum);
+        }
+
+        protected override void FireWeapon(float x, float y, float xSpeed, float ySpeed)
+        {
+            Map.HurtWildLife(x + base.transform.localScale.x * 13f, y + 5f, 12f);
+            deflectProjectilesCounter = deflectProjectilesEnergy;
+            deflectProjectilesEnergy = 0f;
+            DeflectProjectiles();
+            Map.DamageDoodads(3, DamageType.Knifed, x + (float)(base.Direction * 4), y, 0f, 0f, 8f, base.playerNum, out var _);
+            SetGunSprite(gunFrame, 0);
+            float num = base.transform.localScale.x * 12f;
+            ConstrainToFragileBarriers(ref num, 16f);
+            if (!TryHitWalls(x, y, xSpeed, ySpeed))
+            {
+                hasHitWithWall = false;
+                SwingSword(ground: false);
+            }
+        }
+
+        protected override void SwingSword(bool ground)
+        {
+            if (_hadRiotShield)
+                return;
+            if (_secondSwordHit && _mookRiotShield != null)
+            {
+                _mookRiotShield.Damage(0, DamageType.Melee, base.transform.localScale.x * 420f, 360f, base.Direction, this, base.transform.position.x, base.transform.position.y);
+                _mookRiotShield.SetFieldValue("fireAmount", 64);
+                _mookRiotShield.Damage(1, DamageType.Fire, 0f, 0f, base.Direction, this, base.transform.position.x, base.transform.position.y);
+
+                _mookRiotShield = null;
+                _secondSwordHit = false;
+                _hadRiotShield = true;
+                return;
+            }
+
+            _mookRiotShield = null;
+            float range = ground ? 10f : 17f;
+            List<Unit> units = Map.GetUnitsInRange(range, range / 2.0f, base.X, base.Y, false);
+            if (units != null && units.Count >= 0)
+            {
+                for (int i = 0; i < units.Count; ++i)
+                {
+                    Unit unit = units[i];
+                    if (unit as MookRiotShield && (unit as MookRiotShield).hasShield)
+                    {
+                        _mookRiotShield = unit as MookRiotShield;
+                    }
+                }
+            }
+            if(_mookRiotShield)
+                alreadyHit.Add(_mookRiotShield);
+            if (Map.HitUnits(this, base.playerNum, this.enemySwordDamage, DamageType.Blade, range, base.X, base.Y, base.transform.localScale.x * 420f, 360f, true, true, true, this.alreadyHit, false, false))
+            {
+                if (!this.hasHitWithSlice)
+                {
+                    SortOfFollow.Shake(0.15f);
+                }
+                this.hasHitWithSlice = true;
+                if (ground)
+                    this.PlayWallSound();
+                else
+                    this.PlaySliceSound();
+
+
+            }
+            else
+            {
+                this.hasHitWithSlice = false;
+            }
+            _secondSwordHit = false;
+        }
+
+        protected override void RunGun()
+        {
+            deflectProjectilesEnergy += t * 0.5f;
+            if (deflectProjectilesEnergy > 0.45f)
+            {
+                deflectProjectilesEnergy = 0.45f;
+            }
+
+            deflectProjectilesCounter -= t;
+            if (WallDrag || gunFrame <= 0)
+            {
+                return;
+            }
+
+            if (deflectProjectilesCounter > 0f)
+            {
+                DeflectProjectiles();
+            }
+
+            gunCounter += t;
+            if (gunCounter <= 0.0334f)
+            {
+                return;
+            }
+
+            gunCounter -= 0.0334f;
+            if (_mookRiotShield != null && gunFrame == 4 && gunCounter > 5.5f)
+            {
+                return;
+            }
+            gunFrame--;
+            if (gunFrame < 0)
+            {
+                gunFrame = 0;
+                _hadRiotShield = false;
+            }
+
+            SetGunSprite(gunFrame, 0);
+            if (gunFrame == 3)
+            { 
+                _secondSwordHit = true;
+                SwingSword(hasHitWithWall);
+                if (!hasHitWithWall)
+                {
+                    TryHitWalls(base.X + 10f * base.transform.localScale.x, base.Y + 6.5f, xI, 0f, alsoHitUnits: false);
+                }
+            }
+        }
+
     }
 }
